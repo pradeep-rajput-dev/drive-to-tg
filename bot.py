@@ -47,7 +47,7 @@ def make_oauth_url(user_id):
     db.save_state(state, user_id)
     params = {
         "client_id": os.environ["GOOGLE_CLIENT_ID"],
-        "redirect_uri": f"{BASE_URL}/oauth/callback",
+        "redirect_uri": GOOGLE_REDIRECT_URI,
         "response_type": "code",
         "scope": "https://www.googleapis.com/auth/drive.readonly",
         "access_type": "offline",
