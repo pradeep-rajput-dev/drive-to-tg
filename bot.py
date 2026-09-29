@@ -1,105 +1,133 @@
 import os
 import re
-import json
 import asyncio
 import tempfile
+import secrets
 from pathlib import Path
+from urllib.parse import urlencode
 
 from pyrogram import Client, filters
 from pyrogram.types import Message
-from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
+
+from storage import db
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
-SERVICE_ACCOUNT_JSON = os.environ["SERVICE_ACCOUNT_JSON"]
-
-SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
-creds = service_account.Credentials.from_service_account_info(
-    json.loads(SERVICE_ACCOUNT_JSON), scopes=SCOPES
-)
-drive = build("drive", "v3", credentials=creds, cache_discovery=False)
+BASE_URL = os.environ["BASE_URL"].rstrip("/")
 
 app = Client("drive_to_tg", bot_token=BOT_TOKEN, api_id=API_ID, api_hash=API_HASH)
 
-# Google-native files need export; ordinary uploaded files use get_media.
 EXPORT_TYPES = {
-    "application/vnd.google-apps.document": (
-        "application/pdf", ".pdf"
-    ),
+    "application/vnd.google-apps.document": ("application/pdf", ".pdf"),
     "application/vnd.google-apps.spreadsheet": (
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsx"
     ),
-    "application/vnd.google-apps.presentation": (
-        "application/pdf", ".pdf"
-    ),
-    "application/vnd.google-apps.drawing": (
-        "image/png", ".png"
-    ),
+    "application/vnd.google-apps.presentation": ("application/pdf", ".pdf"),
+    "application/vnd.google-apps.drawing": ("image/png", ".png"),
 }
 
 def extract_file_id(text):
     for pattern in (
         r"/file/d/([a-zA-Z0-9_-]+)",
         r"[?&]id=([a-zA-Z0-9_-]+)",
-        r"/open\?id=([a-zA-Z0-9_-]+)",
+        r"/open?id=([a-zA-Z0-9_-]+)",
     ):
-        match = re.search(pattern, text)
-        if match:
-            return match.group(1)
+        m = re.search(pattern, text)
+        if m:
+            return m.group(1)
     value = text.strip()
     return value if re.fullmatch(r"[a-zA-Z0-9_-]{10,}", value) else None
 
-def get_file(file_id):
-    return drive.files().get(
+def make_oauth_url(user_id):
+    state = secrets.token_urlsafe(32)
+    db.save_state(state, user_id)
+    params = {
+        "client_id": os.environ["GOOGLE_CLIENT_ID"],
+        "redirect_uri": f"{BASE_URL}/oauth/callback",
+        "response_type": "code",
+        "scope": "https://www.googleapis.com/auth/drive.readonly",
+        "access_type": "offline",
+        "prompt": "consent",
+        "state": state,
+    }
+    return "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params)
+
+def credentials_for(user_id):
+    token = db.get_token(user_id)
+    if not token:
+        return None
+    return Credentials(
+        token=token["access_token"],
+        refresh_token=token.get("refresh_token"),
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=os.environ["GOOGLE_CLIENT_ID"],
+        client_secret=os.environ["GOOGLE_CLIENT_SECRET"],
+        scopes=["https://www.googleapis.com/auth/drive.readonly"],
+    )
+
+def get_file(service, file_id):
+    return service.files().get(
         fileId=file_id,
         fields="id,name,mimeType,size,capabilities(canDownload)",
         supportsAllDrives=True,
     ).execute()
 
-def download_media(request, destination):
-    with open(destination, "wb") as fh:
-        downloader = MediaIoBaseDownload(
-            fh, request, chunksize=8 * 1024 * 1024
+def download_file(service, file_id, destination, mime_type):
+    if mime_type in EXPORT_TYPES:
+        request = service.files().export_media(
+            fileId=file_id, mimeType=EXPORT_TYPES[mime_type][0]
         )
+    else:
+        request = service.files().get_media(
+            fileId=file_id, supportsAllDrives=True
+        )
+    with open(destination, "wb") as fh:
+        downloader = MediaIoBaseDownload(fh, request, chunksize=8 * 1024 * 1024)
         done = False
         while not done:
             _, done = downloader.next_chunk()
 
-def download_file(file_id, destination, mime_type):
-    if mime_type in EXPORT_TYPES:
-        export_mime, _ = EXPORT_TYPES[mime_type]
-        request = drive.files().export_media(
-            fileId=file_id, mimeType=export_mime
-        )
-    else:
-        request = drive.files().get_media(
-            fileId=file_id, supportsAllDrives=True
-        )
-    download_media(request, destination)
-
 @app.on_message(filters.command("start"))
 async def start(_, message: Message):
     await message.reply_text(
-        "📥 Drive → Telegram Bot\n\n"
-        "Google Drive ki downloadable file ka link bhejo.\n"
-        "PDF, video, ZIP, images, documents aur normal binary files supported hain.\n"
-        "Google Docs/Sheets/Slides ko compatible export format mein bheja jayega.\n\n"
-        "Drive ki download/copy restriction bypass nahi hoti."
+        "📥 Drive → Telegram\n\n"
+        "1️⃣ Pehle /login karo\n"
+        "2️⃣ Google account connect karo\n"
+        "3️⃣ Phir Drive link bhejo\n\n"
+        "Har user apna Google account connect karega. JSON ki zarurat nahi."
     )
 
-@app.on_message(filters.command("help"))
-async def help_cmd(_, message: Message):
+@app.on_message(filters.command("login"))
+async def login(_, message: Message):
     await message.reply_text(
-        "Google Drive file link bhejo.\n\n"
-        "Private file ke liye configured service-account email ko file share karo.\n"
-        "Folder links is version mein supported nahi hain."
+        "🔐 Google Drive connect karne ke liye ye link open karo:\n\n"
+        + make_oauth_url(message.from_user.id)
+        + "\n\nAuthorization ke baad isi bot mein Drive link bhejna."
     )
 
-@app.on_message(filters.text & ~filters.command(["start", "help"]))
+@app.on_message(filters.command("logout"))
+async def logout(_, message: Message):
+    db.delete_token(message.from_user.id)
+    await message.reply_text("✅ Google Drive account disconnect kar diya.")
+
+@app.on_message(filters.command("mystatus"))
+async def mystatus(_, message: Message):
+    if db.get_token(message.from_user.id):
+        await message.reply_text("✅ Google Drive connected hai.")
+    else:
+        await message.reply_text("❌ Drive connected nahi hai. /login karo.")
+
+@app.on_message(filters.text & ~filters.command(["start", "login", "logout", "mystatus"]))
 async def handle_link(_, message: Message):
+    creds = credentials_for(message.from_user.id)
+    if not creds:
+        await message.reply_text("❌ Pehle /login karke Google Drive connect karo.")
+        return
+
     file_id = extract_file_id(message.text or "")
     if not file_id:
         await message.reply_text("❌ Valid Google Drive file link nahi mila.")
@@ -109,38 +137,33 @@ async def handle_link(_, message: Message):
     tmp_path = None
 
     try:
-        info = await asyncio.to_thread(get_file, file_id)
+        service = build("drive", "v3", credentials=creds, cache_discovery=False)
+        info = await asyncio.to_thread(get_file, service, file_id)
         name = info.get("name", "drive_file")
         mime_type = info.get("mimeType", "application/octet-stream")
         size = int(info.get("size") or 0)
-        can_download = info.get("capabilities", {}).get("canDownload", False)
 
-        if not can_download:
+        if not info.get("capabilities", {}).get("canDownload", False):
             await status.edit_text(
-                "❌ Is file ke liye download permission available nahi hai.\n"
-                "Owner se download/copy permission enable karwao."
+                "❌ Is file par download permission available nahi hai."
             )
             return
 
-        # Google-native files don't always expose size before export.
         if size and size > 2 * 1024 * 1024 * 1024:
             await status.edit_text("❌ File 2 GB se badi hai.")
             return
 
         suffix = Path(name).suffix
         if mime_type in EXPORT_TYPES:
-            _, export_suffix = EXPORT_TYPES[mime_type]
-            suffix = export_suffix
-            name = Path(name).stem + export_suffix
+            suffix = EXPORT_TYPES[mime_type][1]
+            name = Path(name).stem + suffix
 
         safe_name = Path(name).name.replace("\\", "_").replace("/", "_")
         fd, tmp_path = tempfile.mkstemp(suffix=suffix)
         os.close(fd)
 
         await status.edit_text("⬇️ Downloading: " + safe_name)
-        await asyncio.to_thread(
-            download_file, file_id, tmp_path, mime_type
-        )
+        await asyncio.to_thread(download_file, service, file_id, tmp_path, mime_type)
 
         await status.edit_text("📤 Telegram par upload kar raha hoon...")
         await message.reply_document(
@@ -152,14 +175,12 @@ async def handle_link(_, message: Message):
 
     except Exception as e:
         error = str(e)
-        if "403" in error or "insufficientFilePermissions" in error:
-            msg = "❌ Google Drive ne download permission deny kar di."
+        if "403" in error:
+            msg = "❌ Google Drive ne access/download deny kar diya."
         elif "404" in error:
-            msg = "❌ File nahi mili ya configured account ko access nahi hai."
-        elif "exportSizeLimit" in error:
-            msg = "❌ Google file export size limit cross ho gayi."
+            msg = "❌ File nahi mili ya aapke Google account ko access nahi hai."
         else:
-            msg = "❌ Error: " + error[:800]
+            msg = "❌ Error: " + error[:700]
         await status.edit_text(msg)
     finally:
         if tmp_path:
