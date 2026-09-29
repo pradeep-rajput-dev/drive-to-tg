@@ -18,6 +18,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 BASE_URL = os.environ["BASE_URL"].rstrip("/")
+GOOGLE_REDIRECT_URI = os.environ.get("GOOGLE_REDIRECT_URI", BASE_URL + "/oauth/callback")
 REDIRECT_URI = os.environ.get("GOOGLE_REDIRECT_URI", BASE_URL + "/oauth/callback")
 
 app = Client("drive_to_tg", bot_token=BOT_TOKEN, api_id=API_ID, api_hash=API_HASH)
