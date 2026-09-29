@@ -56,3 +56,6 @@ The bot does not bypass Google Drive download/copy restrictions. If the connecte
 Google Docs, Sheets, Slides and Drawings are exported to supported formats. Normal uploaded files such as videos, PDFs, ZIPs, images and audio are downloaded as files.
 
 Folder downloading is not included in this version.
+
+
+Set GOOGLE_REDIRECT_URI to the exact same URL registered in Google Cloud, for example: `https://YOUR-APP.herokuapp.com/oauth/callback`.
